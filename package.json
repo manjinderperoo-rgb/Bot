@@ -1,0 +1,16 @@
+{
+  "name": "faizan-whatsapp-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.6.0",
+    "axios": "^1.6.8",
+    "dotenv": "^16.3.1",
+    "pino": "^8.15.0",
+    "qrcode-terminal": "^0.12.0",
+    "user-agent": "^1.0.4"
+  }
+}
