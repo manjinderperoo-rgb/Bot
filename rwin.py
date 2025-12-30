@@ -5,6 +5,7 @@ import re
 import unicodedata
 import json
 import asyncio
+import random
 from playwright.async_api import async_playwright
 
 MOBILE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
@@ -82,6 +83,14 @@ def parse_messages(names_arg):
     parts = [part.strip() for part in re.split(pattern, content, flags=re.IGNORECASE) if part.strip()]  
     return parts
 
+def same_thread(current, target):
+    """Compare Instagram DM threads by ID, ignoring extra params/redirects"""
+    try:
+        return current.split("/direct/t/")[1].split("/")[0] == \
+               target.split("/direct/t/")[1].split("/")[0]
+    except:
+        return False
+
 async def login(args, storage_path, headless):
     """Windows async login function"""
     try:
@@ -119,24 +128,32 @@ async def login(args, storage_path, headless):
         print(f"Unexpected login error: {e}")
         return False
 
-async def process_tab(tab_id, page, url, msg, dm_selector):
-    """Process a single tab: navigate to URL, wait for visible DM box, send one message immediately with retries"""
-    max_retries = 2
+async def process_tab(tab_id, page, target_url, msg, dm_selector):
+    """Process a single tab: navigate only if needed (thread ID match), wait for visible DM box, send one message with retries"""
+    max_retries = 1
     for retry in range(max_retries):
         try:
-            await page.goto(url, timeout=60000)
+            # Avoid unnecessary goto if same thread ID
+            if not same_thread(page.url, target_url):
+                await page.goto(target_url, timeout=60000)
+            else:
+                print(f"Tab {tab_id} already on thread of {target_url[:50]}..., skipping goto.")
+
             # Wait for the DM selector to be visible (not just present)
             await page.wait_for_selector(dm_selector, state="visible", timeout=30000)
 
-            # Send immediately once visible
+            # Brief pause before sending for pacing
+            await asyncio.sleep(1.3)
+
+            # Send message
             await page.click(dm_selector)
             await page.fill(dm_selector, msg)
             await page.press(dm_selector, 'Enter')
-            print(f"Tab {tab_id} sent '{msg[:50]}...' to {url[:50]}...")
-            await asyncio.sleep(1)  # Minimal settle after send
+            print(f"Tab {tab_id} sent '{msg[:50]}...' to {target_url[:50]}...")
+            await asyncio.sleep(random.uniform(1.0, 1.6))  # Settle after send (adjusted shorter)
             return True
         except Exception as e:
-            print(f"Tab {tab_id} process retry {retry+1}/{max_retries} failed for {url[:50]}... with '{msg[:50]}...': {e}")
+            print(f"Tab {tab_id} process retry {retry+1}/{max_retries} failed for {target_url[:50]}... with '{msg[:50]}...': {e}")
             if retry < max_retries - 1:
                 await asyncio.sleep(1)  # Shorter retry delay for lightness
             else:
@@ -144,8 +161,8 @@ async def process_tab(tab_id, page, url, msg, dm_selector):
                 return False
 
 async def main():
-    """Windows main function with infinite lightweight batched looping (7 tabs)"""
-    parser = argparse.ArgumentParser(description="Instagram DM Infinite Lightweight Batch Looper for Windows (7 tabs)")
+    """Windows main function with infinite lightweight batched looping (optimized to 4 tabs)"""
+    parser = argparse.ArgumentParser(description="Instagram DM Infinite Lightweight Batch Looper for Windows (optimized 4 tabs)")
     parser.add_argument('--username', required=False, help='Instagram username')
     parser.add_argument('--password', required=False, help='Instagram password')
     parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs')
@@ -188,7 +205,7 @@ async def main():
 
     print(f"Parsed {len(messages)} messages from {args.names}. Cycling through them.")
 
-    batch_size = 7
+    batch_size = 4  # Adjusted to 4 tabs as requested
     print(f"Using {batch_size} lightweight persistent tabs to loop over {len(thread_urls)} threads infinitely. Press Ctrl+C to stop.")
 
     async with async_playwright() as p:
@@ -229,9 +246,14 @@ async def main():
                 total_processed += successful
                 print(f"Batch {batch_num + 1} completed: {successful}/{batch_size} messages sent. Total: {total_processed}")
 
+                # Graceful cooldown after batch (shorter as requested)
                 if successful == 0:
-                    print("All tabs failed this batch. Pausing briefly before retry...")
-                    await asyncio.sleep(5)  # Short pause if all fail
+                    print("All tabs failed this batch. Longer pause before retry...")
+                    cooldown = 19  # Extended recovery pause
+                else:
+                    cooldown = random.uniform(1.0, 1.6)  # Short cooldown after batch
+                print(f"Cooldown for {cooldown:.1f}s...")
+                await asyncio.sleep(cooldown)
                 
                 batch_num += 1
 
