@@ -128,33 +128,9 @@ async def login(args, storage_path, headless):
         print(f"Unexpected login error: {e}")
         return False
 
-async def process_tab(tab_id, page, target_url, msg, dm_selector):
-    """Process a single tab: navigate only if needed, send one message without visibility check or retries"""
-    try:
-        # Avoid unnecessary goto if same thread ID
-        if not same_thread(page.url, target_url):
-            await page.goto(target_url, timeout=60000)
-            print(f"Tab {tab_id} loaded {target_url[:50]}...")
-        else:
-            print(f"Tab {tab_id} already on thread of {target_url[:50]}..., skipping goto.")
-
-        # Wait 0.5s after load before sending
-        await asyncio.sleep(0.5)
-
-        # Send message without waiting for visibility
-        await page.click(dm_selector)
-        await page.fill(dm_selector, msg)
-        await page.press(dm_selector, 'Enter')
-        print(f"Tab {tab_id} sent '{msg[:50]}...' to {target_url[:50]}...")
-        await asyncio.sleep(random.uniform(1.0, 1.6))  # Settle after send
-        return True
-    except Exception as e:
-        print(f"Tab {tab_id} failed for {target_url[:50]}... with '{msg[:50]}...': {e}")
-        return False
-
 async def main():
-    """Windows main function with infinite sequential 7-tab batch looping over GCs"""
-    parser = argparse.ArgumentParser(description="Instagram DM Infinite Sequential 7-Tab Batch Looper for Windows")
+    """Windows main function with infinite parallel-load sequential-send 7-tab batch looping over GCs"""
+    parser = argparse.ArgumentParser(description="Instagram DM Infinite 7-Tab Batch Looper for Windows")
     parser.add_argument('--username', required=False, help='Instagram username')
     parser.add_argument('--password', required=False, help='Instagram password')
     parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs (any number of GCs)')
@@ -198,7 +174,7 @@ async def main():
     print(f"Parsed {len(messages)} messages from {args.names}. Cycling through them.")
 
     batch_size = 7
-    print(f"Using {batch_size} persistent tabs to loop over {len(thread_urls)} GC threads in sequential batches infinitely. Press Ctrl+C to stop.")
+    print(f"Using {batch_size} persistent tabs to loop over {len(thread_urls)} GC threads in batches infinitely. Press Ctrl+C to stop.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -218,36 +194,73 @@ async def main():
         dm_selector = 'div[role="textbox"][aria-label="Message"]'
         pages = [await context.new_page() for _ in range(batch_size)]
         total_processed = 0
-        cycle_num = 0
+        batch_num = 0
         msg_idx = 0
+        url_idx = 0
 
         try:
             while True:
-                print(f"\n--- Cycle {cycle_num + 1} ---")
-                cycle_success = 0
-                for i in range(batch_size):
-                    if msg_idx >= len(messages) * (cycle_num + 1):  # But since modulo, no need, but anyway
-                        pass
-                    url_idx = (cycle_num * batch_size + i) % len(thread_urls)
-                    url = thread_urls[url_idx]
-                    msg = messages[msg_idx % len(messages)]
-                    success = await process_tab(i + 1, pages[i], url, msg, dm_selector)
-                    if success:
-                        cycle_success += 1
-                    msg_idx += 1  # Advance for next
+                print(f"\n--- Batch {batch_num + 1} ---")
+                batch_success = 0
+                batch_urls = []
+                load_tasks = []
 
-                    # 0.5s delay between sends in batch
+                # Parallel load next batch of URLs
+                for i in range(batch_size):
+                    this_url_idx = url_idx % len(thread_urls)
+                    url = thread_urls[this_url_idx]
+                    batch_urls.append(url)
+                    
+                    if not same_thread(pages[i].url, url):
+                        load_tasks.append(pages[i].goto(url, timeout=60000))
+                        print(f"Tab {i+1} loading new {url[:50]}...")
+                    else:
+                        load_tasks.append(asyncio.sleep(0))
+                        print(f"Tab {i+1} already on {url[:50]}...")
+                    
+                    url_idx += 1
+
+                # Execute loads in parallel
+                load_results = await asyncio.gather(*load_tasks, return_exceptions=True)
+                for j, res in enumerate(load_results):
+                    if isinstance(res, Exception):
+                        print(f"Tab {j+1} load failed: {res}")
+                
+                print("Batch of 7 GCs loaded.")
+
+                # Sequential sends with 0.5s delay between
+                for i in range(batch_size):
+                    url = batch_urls[i]
+                    msg = messages[msg_idx % len(messages)]
+                    
+                    try:
+                        await pages[i].click(dm_selector)
+                        await pages[i].fill(dm_selector, msg)
+                        await pages[i].press(dm_selector, 'Enter')
+                        print(f"Tab {i+1} sent '{msg[:50]}...' to {url[:50]}...")
+                        batch_success += 1
+                    except Exception as e:
+                        print(f"Tab {i+1} failed to send '{msg[:50]}...' to {url[:50]}...: {e}")
+                    
+                    msg_idx += 1
+                    
+                    # 0.5s delay between sends (not after last)
                     if i < batch_size - 1:
                         await asyncio.sleep(0.5)
 
-                total_processed += cycle_success
-                print(f"Cycle {cycle_num + 1} completed: {cycle_success}/{batch_size} messages sent to GCs. Total: {total_processed}")
-                print("1 cycle complete")
+                total_processed += batch_success
+                print(f"Batch {batch_num + 1} completed: {batch_success}/{batch_size} messages sent to GCs. Total: {total_processed}")
+
+                # Check for full cycle completion
+                if (url_idx - batch_size) % len(thread_urls) == 0 and url_idx % len(thread_urls) == 0:
+                    print("1 cycle complete")
+                elif url_idx % len(thread_urls) == 0:
+                    print("1 cycle complete")
 
                 # 1.4s cooldown after batch
                 await asyncio.sleep(1.4)
                 
-                cycle_num += 1
+                batch_num += 1
 
         except KeyboardInterrupt:
             print("\nInterrupted by user (Ctrl+C). Cleaning up...")
