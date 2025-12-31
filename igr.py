@@ -1,11 +1,9 @@
 import argparse
 import os
 import json
-import asyncio
-import random
+import time
 import re
 from instagrapi import Client
-import time
 
 def sanitize_input(raw):
     """Fix shell-truncated input"""
@@ -14,55 +12,50 @@ def sanitize_input(raw):
     return raw
 
 def parse_messages(names_arg):
-    """
-    Robust parser for messages for Windows
-    """
+    """Robust parser for messages from file or string"""
     if isinstance(names_arg, list):
         names_arg = " ".join(names_arg)
 
-    content = None  
-    is_file = isinstance(names_arg, str) and names_arg.endswith('.txt') and os.path.exists(names_arg)  
+    content = None
+    is_file = isinstance(names_arg, str) and names_arg.endswith('.txt') and os.path.exists(names_arg)
 
-    if is_file:  
-        try:  
-            msgs = []  
-            with open(names_arg, 'r', encoding='utf-8') as f:  
-                lines = [ln.rstrip('\n') for ln in f if ln.strip()]  
-            for ln in lines:  
-                m = json.loads(ln)  
-                if isinstance(m, str):  
-                    msgs.append(m)  
-                else:  
-                    raise ValueError("JSON line is not a string")  
-            if msgs:  
-                out = []  
-                for m in msgs:  
-                    out.append(m)  
-                return out  
-        except Exception:  
-            pass  
+    if is_file:
+        try:
+            msgs = []
+            with open(names_arg, 'r', encoding='utf-8') as f:
+                lines = [ln.rstrip('\n') for ln in f if ln.strip()]
+            for ln in lines:
+                m = json.loads(ln)
+                if isinstance(m, str):
+                    msgs.append(m)
+                else:
+                    raise ValueError("JSON line is not a string")
+            if msgs:
+                return msgs
+        except Exception:
+            pass
 
-        try:  
-            with open(names_arg, 'r', encoding='utf-8') as f:  
-                content = f.read()  
-        except Exception as e:  
-            raise ValueError(f"Failed to read file {names_arg}: {e}")  
-    else:  
-        content = str(names_arg)  
+        try:
+            with open(names_arg, 'r', encoding='utf-8') as f:
+                content = f.read()
+        except Exception as e:
+            raise ValueError(f"Failed to read file {names_arg}: {e}")
+    else:
+        content = str(names_arg)
 
-    if content is None:  
-        raise ValueError("No valid content to parse")  
+    if content is None:
+        raise ValueError("No valid content to parse")
 
-    content = (  
-        content.replace('﹠', '&')  
-        .replace('＆', '&')  
-        .replace('⅋', '&')  
-        .replace('ꓸ', '&')  
-        .replace('︔', '&')  
-    )  
+    content = (
+        content.replace('﹠', '&')
+        .replace('＆', '&')
+        .replace('⅋', '&')
+        .replace('ꓸ', '&')
+        .replace('︔', '&')
+    )
 
-    pattern = r'\s*(?:&|\band\b)\s*'  
-    parts = [part.strip() for part in re.split(pattern, content, flags=re.IGNORECASE) if part.strip()]  
+    pattern = r'\s*(?:&|\band\b)\s*'
+    parts = [part.strip() for part in re.split(pattern, content, flags=re.IGNORECASE) if part.strip()]
     return parts
 
 def extract_thread_ids(thread_url_arg):
@@ -77,7 +70,7 @@ def extract_thread_ids(thread_url_arg):
             print(f"Invalid URL format: {url}")
     return thread_ids
 
-async def login_or_load(username, password, session_path):
+def login_or_load(username, password, session_path):
     """Login to Instagram and save/load session"""
     cl = Client()
     if os.path.exists(session_path):
@@ -89,7 +82,7 @@ async def login_or_load(username, password, session_path):
             return cl
         except Exception as e:
             print(f"Session invalid: {e}. Performing fresh login.")
-    
+
     print("Logging in to Instagram...")
     try:
         cl.login(username, password)
@@ -100,7 +93,7 @@ async def login_or_load(username, password, session_path):
         print(f"Login failed: {e}")
         raise
 
-async def main():
+def main():
     """Instagram DM Infinite Sequential Sender using Instagrapi"""
     parser = argparse.ArgumentParser(description="Instagram DM Infinite Sequential Sender using Instagrapi")
     parser.add_argument('--username', required=True, help='Instagram username')
@@ -108,7 +101,7 @@ async def main():
     parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs')
     parser.add_argument('--names', nargs='+', default=['m.txt'], help='Messages list or .txt file (default: m.txt)')
     parser.add_argument('--session-state', default='session.json', help='Path to JSON file for session state (default: session.json)')
-    
+
     args = parser.parse_args()
     args.names = sanitize_input(args.names)
 
@@ -130,9 +123,9 @@ async def main():
         return
 
     print(f"Parsed {len(messages)} messages from {args.names}. Cycling through them.")
-    print(f"Using Instagrapi to loop over {len(thread_ids)} GC threads sequentially and infinitely. Press Ctrl+C to stop.")
+    print(f"Looping over {len(thread_ids)} GC threads sequentially and infinitely. Press Ctrl+C to stop.")
 
-    cl = await login_or_load(args.username, args.password, session_path)
+    cl = login_or_load(args.username, args.password, session_path)
 
     total_processed = 0
     cycle_num = 0
@@ -142,17 +135,19 @@ async def main():
         while True:
             print(f"\n--- Cycle {cycle_num + 1} ---")
             cycle_success = 0
-            for tid in thread_ids:
+            for tid_str in thread_ids:
+                tid = int(tid_str)
                 msg = messages[msg_idx % len(messages)]
                 try:
-                    cl.direct_send(msg, [tid])
-                    print(f"Sent '{msg[:50]}...' to thread {tid[:20]}...")
+                    thread = cl.direct_thread(tid)
+                    thread.send_text(msg)
+                    print(f"Sent '{msg[:50]}...' to thread {tid}...")
                     cycle_success += 1
                 except Exception as e:
-                    print(f"Failed to send '{msg[:50]}...' to thread {tid[:20]}...: {e}")
-                
+                    print(f"Failed to send '{msg[:50]}...' to thread {tid}: {e}")
+
                 msg_idx += 1
-                await asyncio.sleep(1.6)  # 1.6s delay after each send
+                time.sleep(1.6)  # 1.6s delay after each send
 
             total_processed += cycle_success
             print(f"Cycle {cycle_num + 1} completed: {cycle_success}/{len(thread_ids)} messages sent to GCs. Total: {total_processed}")
@@ -167,4 +162,4 @@ async def main():
         print(f"Stopped. Total messages sent: {total_processed}")
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
