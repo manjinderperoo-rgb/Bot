@@ -129,43 +129,34 @@ async def login(args, storage_path, headless):
         return False
 
 async def process_tab(tab_id, page, target_url, msg, dm_selector):
-    """Process a single tab: navigate only if needed (thread ID match), wait for visible DM box, send one message with retries"""
-    max_retries = 1
-    for retry in range(max_retries):
-        try:
-            # Avoid unnecessary goto if same thread ID
-            if not same_thread(page.url, target_url):
-                await page.goto(target_url, timeout=60000)
-            else:
-                print(f"Tab {tab_id} already on thread of {target_url[:50]}..., skipping goto.")
+    """Process a single tab: navigate only if needed, send one message without visibility check or retries"""
+    try:
+        # Avoid unnecessary goto if same thread ID
+        if not same_thread(page.url, target_url):
+            await page.goto(target_url, timeout=60000)
+        else:
+            print(f"Tab {tab_id} already on thread of {target_url[:50]}..., skipping goto.")
 
-            # Wait for the DM selector to be visible (not just present)
-            await page.wait_for_selector(dm_selector, state="visible", timeout=30000)
+        # Brief pause before sending for pacing
+        await asyncio.sleep(1.3)
 
-            # Brief pause before sending for pacing
-            await asyncio.sleep(1.3)
-
-            # Send message
-            await page.click(dm_selector)
-            await page.fill(dm_selector, msg)
-            await page.press(dm_selector, 'Enter')
-            print(f"Tab {tab_id} sent '{msg[:50]}...' to {target_url[:50]}...")
-            await asyncio.sleep(random.uniform(1.0, 1.6))  # Settle after send (adjusted shorter)
-            return True
-        except Exception as e:
-            print(f"Tab {tab_id} process retry {retry+1}/{max_retries} failed for {target_url[:50]}... with '{msg[:50]}...': {e}")
-            if retry < max_retries - 1:
-                await asyncio.sleep(1)  # Shorter retry delay for lightness
-            else:
-                print(f"Tab {tab_id} failed after {max_retries} retries, skipping this cycle.")
-                return False
+        # Send message without waiting for visibility
+        await page.click(dm_selector)
+        await page.fill(dm_selector, msg)
+        await page.press(dm_selector, 'Enter')
+        print(f"Tab {tab_id} sent '{msg[:50]}...' to {target_url[:50]}...")
+        await asyncio.sleep(random.uniform(1.0, 1.6))  # Settle after send
+        return True
+    except Exception as e:
+        print(f"Tab {tab_id} failed for {target_url[:50]}... with '{msg[:50]}...': {e}")
+        return False
 
 async def main():
-    """Windows main function with infinite lightweight batched looping (optimized to 4 tabs)"""
-    parser = argparse.ArgumentParser(description="Instagram DM Infinite Lightweight Batch Looper for Windows (optimized 4 tabs)")
+    """Windows main function with infinite lightweight batched looping (optimized to 4 tabs for 4 GCs)"""
+    parser = argparse.ArgumentParser(description="Instagram DM Infinite Lightweight Batch Looper for Windows (optimized 4 tabs for 4 GCs)")
     parser.add_argument('--username', required=False, help='Instagram username')
     parser.add_argument('--password', required=False, help='Instagram password')
-    parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs')
+    parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs (expecting 4 GCs)')
     parser.add_argument('--names', nargs='+', default=['m.txt'], help='Messages list or .txt file (default: m.txt)')
     parser.add_argument('--headless', default='true', choices=['true', 'false'], help='Run in headless mode')
     parser.add_argument('--storage-state', required=True, help='Path to JSON file for login state')
@@ -174,6 +165,8 @@ async def main():
     args.names = sanitize_input(args.names)
 
     thread_urls = [u.strip() for u in args.thread_url.split(',') if u.strip()]
+    if len(thread_urls) != 4:
+        print("Warning: Expecting exactly 4 GC thread URLs, but got {}.".format(len(thread_urls)))
     if not thread_urls:
         print("Error: No valid thread URLs provided.")
         return
@@ -205,8 +198,8 @@ async def main():
 
     print(f"Parsed {len(messages)} messages from {args.names}. Cycling through them.")
 
-    batch_size = 4  # Adjusted to 4 tabs as requested
-    print(f"Using {batch_size} lightweight persistent tabs to loop over {len(thread_urls)} threads infinitely. Press Ctrl+C to stop.")
+    batch_size = 4  # Fixed to 4 tabs for 4 GCs
+    print(f"Using {batch_size} lightweight persistent tabs to loop over {len(thread_urls)} threads (4 GCs) infinitely without visibility checks or retries. Press Ctrl+C to stop.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -244,14 +237,10 @@ async def main():
                 results = await asyncio.gather(*tasks, return_exceptions=True)
                 successful = sum(1 for r in results if isinstance(r, bool) and r)
                 total_processed += successful
-                print(f"Batch {batch_num + 1} completed: {successful}/{batch_size} messages sent. Total: {total_processed}")
+                print(f"Batch {batch_num + 1} completed: {successful}/{batch_size} messages sent to GCs. Total: {total_processed}")
 
-                # Graceful cooldown after batch (shorter as requested)
-                if successful == 0:
-                    print("All tabs failed this batch. Longer pause before retry...")
-                    cooldown = 19  # Extended recovery pause
-                else:
-                    cooldown = random.uniform(1.0, 1.6)  # Short cooldown after batch
+                # Graceful cooldown after batch (continuous sending)
+                cooldown = random.uniform(1.0, 1.6)  # Short cooldown for continuous flow
                 print(f"Cooldown for {cooldown:.1f}s...")
                 await asyncio.sleep(cooldown)
                 
