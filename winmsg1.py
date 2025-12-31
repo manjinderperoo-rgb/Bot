@@ -145,7 +145,7 @@ async def sender(tab_id, args, messages, context, page):
     while True:
         msg = messages[msg_index]
         send_success = False
-        max_retries = 2
+        max_retries = 1
         
         for retry in range(max_retries):
             try:
