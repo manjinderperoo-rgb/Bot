@@ -8,7 +8,7 @@ import asyncio
 import random
 from playwright.async_api import async_playwright
 
-MOBILE_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
+MOBILE_UA = "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36"
 MOBILE_VIEWPORT = {"width": 412, "height": 915}
 
 LAUNCH_ARGS = [
@@ -134,11 +134,12 @@ async def process_tab(tab_id, page, target_url, msg, dm_selector):
         # Avoid unnecessary goto if same thread ID
         if not same_thread(page.url, target_url):
             await page.goto(target_url, timeout=60000)
+            print(f"Tab {tab_id} loaded {target_url[:50]}...")
         else:
             print(f"Tab {tab_id} already on thread of {target_url[:50]}..., skipping goto.")
 
-        # Brief pause before sending for pacing
-        await asyncio.sleep(1.3)
+        # Wait 0.5s after load before sending
+        await asyncio.sleep(0.5)
 
         # Send message without waiting for visibility
         await page.click(dm_selector)
@@ -152,11 +153,11 @@ async def process_tab(tab_id, page, target_url, msg, dm_selector):
         return False
 
 async def main():
-    """Windows main function with infinite lightweight batched looping (optimized to 4 tabs for 4 GCs)"""
-    parser = argparse.ArgumentParser(description="Instagram DM Infinite Lightweight Batch Looper for Windows (optimized 4 tabs for 4 GCs)")
+    """Windows main function with infinite sequential 7-tab batch looping over GCs"""
+    parser = argparse.ArgumentParser(description="Instagram DM Infinite Sequential 7-Tab Batch Looper for Windows")
     parser.add_argument('--username', required=False, help='Instagram username')
     parser.add_argument('--password', required=False, help='Instagram password')
-    parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs (expecting 4 GCs)')
+    parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs (any number of GCs)')
     parser.add_argument('--names', nargs='+', default=['m.txt'], help='Messages list or .txt file (default: m.txt)')
     parser.add_argument('--headless', default='true', choices=['true', 'false'], help='Run in headless mode')
     parser.add_argument('--storage-state', required=True, help='Path to JSON file for login state')
@@ -165,8 +166,6 @@ async def main():
     args.names = sanitize_input(args.names)
 
     thread_urls = [u.strip() for u in args.thread_url.split(',') if u.strip()]
-    if len(thread_urls) != 4:
-        print("Warning: Expecting exactly 4 GC thread URLs, but got {}.".format(len(thread_urls)))
     if not thread_urls:
         print("Error: No valid thread URLs provided.")
         return
@@ -198,8 +197,8 @@ async def main():
 
     print(f"Parsed {len(messages)} messages from {args.names}. Cycling through them.")
 
-    batch_size = 4  # Fixed to 4 tabs for 4 GCs
-    print(f"Using {batch_size} lightweight persistent tabs to loop over {len(thread_urls)} threads (4 GCs) infinitely without visibility checks or retries. Press Ctrl+C to stop.")
+    batch_size = 7
+    print(f"Using {batch_size} persistent tabs to loop over {len(thread_urls)} GC threads in sequential batches infinitely. Press Ctrl+C to stop.")
 
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -219,32 +218,36 @@ async def main():
         dm_selector = 'div[role="textbox"][aria-label="Message"]'
         pages = [await context.new_page() for _ in range(batch_size)]
         total_processed = 0
-        batch_num = 0
+        cycle_num = 0
         msg_idx = 0
 
         try:
             while True:
-                print(f"\n--- Batch {batch_num + 1} ---")
-                tasks = []
+                print(f"\n--- Cycle {cycle_num + 1} ---")
+                cycle_success = 0
                 for i in range(batch_size):
-                    url_idx = (batch_num * batch_size + i) % len(thread_urls)
+                    if msg_idx >= len(messages) * (cycle_num + 1):  # But since modulo, no need, but anyway
+                        pass
+                    url_idx = (cycle_num * batch_size + i) % len(thread_urls)
                     url = thread_urls[url_idx]
                     msg = messages[msg_idx % len(messages)]
-                    task = asyncio.create_task(process_tab(i + 1, pages[i], url, msg, dm_selector))
-                    tasks.append(task)
+                    success = await process_tab(i + 1, pages[i], url, msg, dm_selector)
+                    if success:
+                        cycle_success += 1
                     msg_idx += 1  # Advance for next
 
-                results = await asyncio.gather(*tasks, return_exceptions=True)
-                successful = sum(1 for r in results if isinstance(r, bool) and r)
-                total_processed += successful
-                print(f"Batch {batch_num + 1} completed: {successful}/{batch_size} messages sent to GCs. Total: {total_processed}")
+                    # 0.5s delay between sends in batch
+                    if i < batch_size - 1:
+                        await asyncio.sleep(0.5)
 
-                # Graceful cooldown after batch (continuous sending)
-                cooldown = random.uniform(1.0, 1.6)  # Short cooldown for continuous flow
-                print(f"Cooldown for {cooldown:.1f}s...")
-                await asyncio.sleep(cooldown)
+                total_processed += cycle_success
+                print(f"Cycle {cycle_num + 1} completed: {cycle_success}/{batch_size} messages sent to GCs. Total: {total_processed}")
+                print("1 cycle complete")
+
+                # 1.4s cooldown after batch
+                await asyncio.sleep(1.4)
                 
-                batch_num += 1
+                cycle_num += 1
 
         except KeyboardInterrupt:
             print("\nInterrupted by user (Ctrl+C). Cleaning up...")
