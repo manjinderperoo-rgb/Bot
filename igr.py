@@ -1,12 +1,11 @@
 import argparse
 import os
-import re
 import json
 import asyncio
 import random
-import time
+import re
 from instagrapi import Client
-from instagrapi.exceptions import ClientError, LoginRequired
+import time
 
 def sanitize_input(raw):
     """Fix shell-truncated input"""
@@ -66,134 +65,105 @@ def parse_messages(names_arg):
     parts = [part.strip() for part in re.split(pattern, content, flags=re.IGNORECASE) if part.strip()]  
     return parts
 
-def extract_thread_id(url):
-    """Extract thread ID from Instagram DM URL like https://www.instagram.com/direct/t/123/"""
-    try:
-        match = re.search(r'/direct/t/(\d+)/', url)
-        if match:
-            return match.group(1)
-        return None
-    except:
-        return None
-
-async def login(args, session_path):
-    """Async login with instagrapi"""
-    cl = Client()
-    try:
-        if os.path.exists(session_path):
-            cl.load_settings(session_path)
-            cl.login(args.username, args.password)
-            print("Loaded existing session.")
-            return cl
-        else:
-            print("Logging in to Instagram...")
-            cl.login(args.username, args.password)
-            cl.dump_settings(session_path)
-            print("Login successful, saving session.")
-            return cl
-    except Exception as e:
-        print(f"Login error: {e}")
-        return None
-
-async def send_to_thread(cl, thread_id, msg):
-    """Send message to thread with retries"""
-    max_retries = 2
-    for retry in range(max_retries):
+def extract_thread_ids(thread_url_arg):
+    """Extract thread IDs from comma-separated Instagram direct URLs"""
+    urls = [u.strip() for u in thread_url_arg.split(',') if u.strip()]
+    thread_ids = []
+    for url in urls:
         try:
-            cl.direct_send(msg, thread_ids=[thread_id])
-            print(f"Sent '{msg[:50]}...' to thread {thread_id}")
-            return True
-        except (ClientError, LoginRequired) as e:
-            print(f"Send retry {retry+1}/{max_retries} failed for thread {thread_id} with '{msg[:50]}...': {e}")
-            if retry < max_retries - 1:
-                await asyncio.sleep(1)
-            else:
-                print(f"Failed after {max_retries} retries, skipping.")
-                return False
-    return False
+            tid = url.split('/direct/t/')[1].split('/')[0]
+            thread_ids.append(tid)
+        except IndexError:
+            print(f"Invalid URL format: {url}")
+    return thread_ids
+
+async def login_or_load(username, password, session_path):
+    """Login to Instagram and save/load session"""
+    cl = Client()
+    if os.path.exists(session_path):
+        print("Using existing session, loading...")
+        try:
+            cl.load_settings(session_path)
+            cl.login(username, password)  # Validate session
+            print("Session loaded successfully.")
+            return cl
+        except Exception as e:
+            print(f"Session invalid: {e}. Performing fresh login.")
+    
+    print("Logging in to Instagram...")
+    try:
+        cl.login(username, password)
+        cl.dump_settings(session_path)
+        print("Login successful, saving session.")
+        return cl
+    except Exception as e:
+        print(f"Login failed: {e}")
+        raise
 
 async def main():
-    """Main function: Sequential infinite loop over threads with 1.5s delays"""
-    parser = argparse.ArgumentParser(description="Instagram DM Sequential Looper using Instagrapi for Windows")
+    """Instagram DM Infinite Sequential Sender using Instagrapi"""
+    parser = argparse.ArgumentParser(description="Instagram DM Infinite Sequential Sender using Instagrapi")
     parser.add_argument('--username', required=True, help='Instagram username')
     parser.add_argument('--password', required=True, help='Instagram password')
     parser.add_argument('--thread-url', required=True, help='Comma-separated Instagram direct thread URLs')
     parser.add_argument('--names', nargs='+', default=['m.txt'], help='Messages list or .txt file (default: m.txt)')
-    parser.add_argument('--session', default='session.json', help='Path to session file (default: session.json)')
+    parser.add_argument('--session-state', default='session.json', help='Path to JSON file for session state (default: session.json)')
     
     args = parser.parse_args()
     args.names = sanitize_input(args.names)
 
-    thread_urls = [u.strip() for u in args.thread_url.split(',') if u.strip()]
-    if not thread_urls:
-        print("Error: No valid thread URLs provided.")
-        return
-
-    # Extract thread IDs
-    thread_ids = []
-    for url in thread_urls:
-        tid = extract_thread_id(url)
-        if tid:
-            thread_ids.append(tid)
-        else:
-            print(f"Warning: Invalid thread URL: {url}")
-
+    thread_ids = extract_thread_ids(args.thread_url)
     if not thread_ids:
-        print("Error: No valid thread IDs extracted.")
+        print("Error: No valid thread IDs extracted from URLs.")
         return
 
-    print(f"Extracted {len(thread_ids)} thread IDs from URLs.")
+    session_path = args.session_state
 
-    session_path = args.session
-    do_login = True  # Always attempt login or load session
-
-    cl = await login(args, session_path)
-    if not cl:
-        print("Login failed, exiting.")
+    try:
+        messages = parse_messages(args.names)
+    except ValueError as e:
+        print(f"Error parsing messages: {e}")
         return
 
-    try:  
-        messages = parse_messages(args.names)  
-    except ValueError as e:  
-        print(f"Error parsing messages: {e}")  
-        return  
+    if not messages:
+        print("Error: No valid messages provided.")
+        return
 
-    if not messages:  
-        print("Error: No valid messages provided.")  
-        return  
+    print(f"Parsed {len(messages)} messages from {args.names}. Cycling through them.")
+    print(f"Using Instagrapi to loop over {len(thread_ids)} GC threads sequentially and infinitely. Press Ctrl+C to stop.")
 
-    print(f"Parsed {len(messages)} messages. Cycling through {len(thread_ids)} threads sequentially with 1.5s delays. Press Ctrl+C to stop.")
+    cl = await login_or_load(args.username, args.password, session_path)
 
     total_processed = 0
-    loop_num = 0
+    cycle_num = 0
     msg_idx = 0
-    tid_idx = 0
 
     try:
         while True:
-            print(f"\n--- Loop {loop_num + 1}, Thread {tid_idx + 1}/{len(thread_ids)} ---")
-            thread_id = thread_ids[tid_idx]
-            msg = messages[msg_idx % len(messages)]
-            
-            success = await send_to_thread(cl, thread_id, msg)
-            if success:
-                total_processed += 1
-                print(f"Success. Total sent: {total_processed}")
-            
-            # Cycle indices
-            tid_idx = (tid_idx + 1) % len(thread_ids)
-            msg_idx += 1
-            
-            # 1.5s delay after each send
-            await asyncio.sleep(1.5)
-            
-            if tid_idx == 0:
-                loop_num += 1
-                print(f"Completed loop {loop_num}. Restarting from first thread.")
+            print(f"\n--- Cycle {cycle_num + 1} ---")
+            cycle_success = 0
+            for tid in thread_ids:
+                msg = messages[msg_idx % len(messages)]
+                try:
+                    cl.direct_send(msg, [tid])
+                    print(f"Sent '{msg[:50]}...' to thread {tid[:20]}...")
+                    cycle_success += 1
+                except Exception as e:
+                    print(f"Failed to send '{msg[:50]}...' to thread {tid[:20]}...: {e}")
+                
+                msg_idx += 1
+                await asyncio.sleep(1.6)  # 1.6s delay after each send
+
+            total_processed += cycle_success
+            print(f"Cycle {cycle_num + 1} completed: {cycle_success}/{len(thread_ids)} messages sent to GCs. Total: {total_processed}")
+            print("1 cycle complete")
+
+            cycle_num += 1
 
     except KeyboardInterrupt:
         print("\nInterrupted by user (Ctrl+C). Cleaning up...")
     finally:
+        cl.dump_settings(session_path)  # Save session on exit
         print(f"Stopped. Total messages sent: {total_processed}")
 
 if __name__ == "__main__":
