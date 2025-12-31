@@ -124,58 +124,75 @@ async def init_page(page, url, dm_selector):
     init_success = False
     for init_try in range(3):
         try:
-            await page.goto("https://www.instagram.com/", timeout=60000)
             await page.goto(url, timeout=60000)
             await page.wait_for_selector(dm_selector, timeout=30000)
             init_success = True
             break
         except Exception as init_e:
-            print(f"Tab for {url[:30]}... try {init_try+1}/3 failed: {init_e}")
+            print(f"Tab init try {init_try+1}/3 failed for {url[:30]}...: {init_e}")
             if init_try < 2:
                 await asyncio.sleep(2)
     return init_success
 
-async def sender(tab_id, args, messages, context, page):
-    """Windows async sender coroutine"""
+async def sender(tab_id, args, messages, page):
+    """Windows async sender coroutine with per-tab failure handling"""
     dm_selector = 'div[role="textbox"][aria-label="Message"]'
     print(f"Tab {tab_id} starting infinite message loop.")
-    current_page = page
     msg_index = 0
+    max_send_retries_without_reload = 2  # First fail: retry send once more, then reload if still fails
     
     while True:
         msg = messages[msg_index]
         send_success = False
-        max_retries = 1
         
-        for retry in range(max_retries):
+        # Try sending with retries without reload
+        for retry in range(max_send_retries_without_reload):
             try:
-                if not current_page.locator(dm_selector).is_visible():
-                    print(f"Tab {tab_id} selector not visible on retry {retry+1}/{max_retries} for '{msg[:50]}...', attempting Enter to clear.")
+                if not page.locator(dm_selector).is_visible():
+                    print(f"Tab {tab_id} selector not visible on retry {retry+1}/{max_send_retries_without_reload} for '{msg[:50]}...', attempting Enter to clear.")
                     try:
-                        await current_page.press(dm_selector, 'Enter')
+                        await page.press(dm_selector, 'Enter')
                         await asyncio.sleep(0.2)
                     except:
                         pass
                     await asyncio.sleep(0.5)
                     continue
 
-                await current_page.click(dm_selector)
-                await current_page.fill(dm_selector, msg)
-                await current_page.press(dm_selector, 'Enter')
+                await page.click(dm_selector)
+                await page.fill(dm_selector, msg)
+                await page.press(dm_selector, 'Enter')
                 print(f"Tab {tab_id} sent message {msg_index + 1}/{len(messages)} on retry {retry+1}")
                 send_success = True
                 break
             except Exception as send_e:
-                print(f"Tab {tab_id} send error on retry {retry+1}/{max_retries} for message {msg_index + 1}: {send_e}")
-                if retry < max_retries - 1:
+                print(f"Tab {tab_id} send error on retry {retry+1}/{max_send_retries_without_reload} for message {msg_index + 1}: {send_e}")
+                if retry < max_send_retries_without_reload - 1:
                     print(f"Tab {tab_id} retrying after brief pause...")
                     await asyncio.sleep(0.5)
-                else:
-                    print(f"Tab {tab_id} all retries failed for message {msg_index + 1}, triggering restart.")
         
+        # If still not successful after retries, reload this tab only and try once more
         if not send_success:
-            raise Exception(f"Tab {tab_id} failed to send after {max_retries} retries")
+            print(f"Tab {tab_id} all send retries failed for message {msg_index + 1}, reloading page.")
+            try:
+                await page.reload(wait_until='networkidle', timeout=60000)
+                await page.wait_for_selector(dm_selector, timeout=30000)
+                print(f"Tab {tab_id} reloaded and selector ready, trying send once more.")
+                
+                # Try send after reload
+                try:
+                    await page.click(dm_selector)
+                    await page.fill(dm_selector, msg)
+                    await page.press(dm_selector, 'Enter')
+                    print(f"Tab {tab_id} sent message {msg_index + 1}/{len(messages)} after reload")
+                    send_success = True
+                except Exception as post_reload_e:
+                    print(f"Tab {tab_id} failed send even after reload: {post_reload_e}")
+                    # Proceed to next message anyway
+            except Exception as reload_e:
+                print(f"Tab {tab_id} reload failed: {reload_e}")
+                # Proceed to next message
         
+        # Always sleep and cycle to next message
         await asyncio.sleep(1.4)
         msg_index = (msg_index + 1) % len(messages)
 
@@ -188,7 +205,7 @@ async def main():
     parser.add_argument('--names', nargs='+', required=True, help='Messages list or .txt file')
     parser.add_argument('--headless', default='true', choices=['true', 'false'], help='Run in headless mode')
     parser.add_argument('--storage-state', required=True, help='Path to JSON file for login state')
-    parser.add_argument('--tabs', type=int, default=1, help='Number of parallel tabs (1-5)')
+    parser.add_argument('--tabs', type=int, default=1, help='Number of parallel tabs (1-25)')
     
     args = parser.parse_args()
     args.names = sanitize_input(args.names)
@@ -224,7 +241,7 @@ async def main():
 
     print(f"Parsed {len(messages)} messages.")  
 
-    tabs = min(max(args.tabs, 1), 5)  
+    tabs = min(max(args.tabs, 1), 25)  
     total_tabs = len(thread_urls) * tabs
     print(f"Using {tabs} tabs per URL across {len(thread_urls)} URLs (total: {total_tabs} tabs).")  
 
@@ -244,73 +261,57 @@ async def main():
         )
         
         dm_selector = 'div[role="textbox"][aria-label="Message"]'
-        pages = []
-        tasks = []
         
+        # Create all pages
+        page_urls = []
+        for url in thread_urls:
+            for i in range(tabs):
+                page = await context.new_page()
+                page_urls.append((page, url))
+
+        # Parallel initialization
+        print("Initializing all tabs in parallel...")
+        init_tasks = [asyncio.create_task(init_page(page, url, dm_selector)) for page, url in page_urls]
+        init_results = await asyncio.gather(*init_tasks, return_exceptions=True)
+        
+        pages = []
+        for idx, result in enumerate(init_results):
+            page, url = page_urls[idx]
+            if isinstance(result, Exception):
+                print(f"Init task {idx+1} for {url[:50]}... raised exception: {result}")
+                try:
+                    await page.close()
+                except:
+                    pass
+            elif result:  # Success bool
+                pages.append(page)
+                print(f"Tab {len(pages)} ready for {url[:50]}...")
+            else:
+                print(f"Init failed after retries for tab {idx+1} ({url[:50]}...), closing.")
+                try:
+                    await page.close()
+                except:
+                    pass
+
+        if not pages:
+            print("No tabs could be initialized, exiting.")
+            await context.close()
+            await browser.close()
+            return
+
+        actual_tabs = len(pages)
+        print(f"All {actual_tabs} tabs ready. Starting message loops.")
+        tasks = [asyncio.create_task(sender(j + 1, args, messages, pages[j])) for j in range(actual_tabs)]
+        print(f"Starting {actual_tabs} tab(s) in infinite message loop. Press Ctrl+C to stop.")
+
         try:
-            while True:
-                for page in pages:
-                    try:
-                        await page.close()
-                    except Exception:
-                        pass
-                pages = []
-                for task in tasks:
-                    try:
-                        task.cancel()
-                    except Exception:
-                        pass
-                if tasks:
-                    await asyncio.gather(*tasks, return_exceptions=True)
-                tasks = []
-
-                page_urls = []
-                for url in thread_urls:
-                    for i in range(tabs):
-                        page = await context.new_page()
-                        page_urls.append((page, url))
-
-                # Sequential initialization
-                for idx, (page, url) in enumerate(page_urls):
-                    print(f"Initializing Tab {idx+1} for {url[:50]}...")
-                    success = await init_page(page, url, dm_selector)
-                    if success:
-                        pages.append(page)
-                        print(f"Tab {len(pages)} ready for {url[:50]}...")
-                    else:
-                        print(f"Tab {idx+1} for {url[:50]}... failed to initialize after 3 tries, skipping.")
-                        try:
-                            await page.close()
-                        except:
-                            pass
-
-                if not pages:
-                    print("No tabs could be initialized, exiting.")
-                    return
-
-                actual_tabs = len(pages)
-                print(f"All {actual_tabs} tabs ready. Starting message loops.")
-                tasks = [asyncio.create_task(sender(j + 1, args, messages, context, pages[j])) for j in range(actual_tabs)]
-                print(f"Starting {actual_tabs} tab(s) in infinite message loop. Press Ctrl+C to stop.")
-
-                pending = set(tasks)
-                while pending:
-                    done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_COMPLETED)
-                    for task in done:
-                        if task.exception():
-                            exc = task.exception()
-                            print(f"Tab task raised exception: {exc}")
-                            for t in list(pending):
-                                t.cancel()
-                            await asyncio.gather(*pending, return_exceptions=True)
-                            pending.clear()
-                            break
-                    else:
-                        continue
-                    break
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             print("\nStopping all tabs...")
         finally:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
             for page in pages:
                 try:
                     await page.close()
