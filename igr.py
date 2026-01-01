@@ -139,8 +139,7 @@ def main():
                 tid = int(tid_str)
                 msg = messages[msg_idx % len(messages)]
                 try:
-                    thread = cl.direct_thread(tid)
-                    thread.send_text(msg)
+                    cl.direct_send(msg, thread_ids=[tid])
                     print(f"Sent '{msg[:50]}...' to thread {tid}...")
                     cycle_success += 1
                 except Exception as e:
